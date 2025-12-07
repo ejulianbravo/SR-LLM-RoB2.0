@@ -1,0 +1,537 @@
+###############################
+## Shiny RoB 2.0 App (cluster RCTs)
+###############################
+
+install.packages(c(
+"shiny", "httr2", "jsonlite", "dplyr",
+"purrr", "pdftools", "tibble", "DT"
+))
+
+library(shiny)
+library(httr2)
+library(jsonlite)
+library(dplyr)
+install.packages("pdftools
+                  ")
+
+library(pdftools)
+library(tibble)
+library(DT)
+
+########################################
+## 1. API CONFIG
+########################################
+
+
+
+api_key  <- Sys.getenv("OPENAI_API_KEY")  # set in your .Renviron or system env
+api_url  <- "https://api.openai.com/v1/chat/completions"
+model_id <- "gpt-4.1"  # or "gpt-5.1" or whatever you use
+
+if (identical(api_key, "")) {
+  warning("OPENAI_API_KEY is not set. The app will not work until you set it.")
+}
+
+########################################
+## 2. CORE LLM CALL WRAPPER
+########################################
+
+call_llm <- function(system_prompt, user_prompt,
+                     model = model_id,
+                     temperature = 0) {
+  req <- request(api_url) |>
+    req_auth_bearer_token(api_key) |>
+    req_body_json(list(
+      model = model,
+      messages = list(
+        list(role = "system", content = system_prompt),
+        list(role = "user",   content = user_prompt)
+      ),
+      temperature = temperature
+    ))
+  
+  resp <- req_perform(req)
+  cont <- resp_body_json(resp, simplifyVector = FALSE)
+  
+  if (!is.null(cont$error)) {
+    stop(paste("LLM API error:", cont$error$message))
+  }
+  
+  cont$choices[[1]]$message$content
+}
+
+########################################
+## 3. MASTER SYSTEM PROMPT
+########################################
+
+rob2_system_prompt <- "
+You are assisting with bias assessment using the Risk of Bias 2.0 (RoB 2.0) tool
+for cluster-randomized, parallel-group trials.
+
+Rules:
+1. Use only these response categories for signalling questions:
+   Y (Yes), PY (Probably Yes), PN (Probably No), N (No), NI (No Information),
+   NA (Not Applicable, only if allowed).
+2. Apply the RoB 2.0 domains for cluster RCTs:
+   - Domain 1a: Bias arising from the randomisation process.
+   - Domain 1b: Bias from timing of identification/recruitment of participants.
+   - Domain 2: Bias due to deviations from intended interventions.
+   - Domain 3: Bias due to missing outcome data.
+   - Domain 4: Bias in measurement of the outcome.
+   - Domain 5: Bias in selection of the reported result.
+3. For each domain:
+   - Use only the information provided.
+   - Answer every signalling question.
+   - Provide a domain judgement: 'Low risk', 'Some concerns', or 'High risk'.
+   - Provide a short, factual justification (2–4 sentences).
+   - If the trial does not report something, use NI.
+4. Do not invent information. If unsure, choose NI.
+5. Output MUST be valid JSON whenever JSON is requested.
+"
+
+########################################
+## 4. PROMPT BUILDERS
+########################################
+
+build_extraction_prompt <- function(trial_text) {
+  sprintf("
+Extract from the trial report only the information relevant to risk-of-bias
+assessment in cluster-randomised, parallel-group trials.
+
+Using only the information in the text, produce JSON with this structure:
+
+{
+  \"randomisation_and_allocation\": \"...\",
+  \"cluster_recruitment_timing\": \"...\",
+  \"blinding_and_deviations\": \"...\",
+  \"attrition_and_missing_data\": \"...\",
+  \"outcome_measurement\": \"...\",
+  \"selective_reporting_indicators\": \"...\"
+}
+
+Each field should be a concise paragraph (<= 200 words), paraphrasing or quoting
+relevant parts. If there is no information for a field, write
+\"No information reported\".
+
+Trial text:
+\"\"\"%s\"\"\"",
+          trial_text
+  )
+}
+
+build_domain1a_prompt <- function(text_block) {
+  sprintf("
+Using the RoB 2.0 cluster-randomised rules, evaluate Domain 1a:
+Bias arising from the randomisation process.
+
+Use ONLY the information in the text below.
+
+Return JSON:
+
+{
+  \"domain\": \"1a_randomisation_process\",
+  \"signalling_questions\": {
+    \"1a.1\": \"\",
+    \"1a.2\": \"\",
+    \"1a.3\": \"\"
+  },
+  \"judgement\": \"\",
+  \"rationale\": \"\"
+}
+
+Where:
+- 1a.1: Was the allocation sequence random?
+- 1a.2: Was the allocation sequence concealed until clusters were enrolled and assigned?
+- 1a.3: Did baseline cluster/participant characteristics suggest successful randomisation?
+
+Use only: Y, PY, PN, N, NI.
+
+Text:
+\"\"\"%s\"\"\"",
+          text_block
+  )
+}
+
+build_domain1b_prompt <- function(text_block) {
+  sprintf("
+Evaluate Domain 1b: Bias from timing of identification and recruitment of participants
+in a cluster-randomised trial.
+
+Use ONLY the information in the text below.
+
+Return JSON:
+
+{
+  \"domain\": \"1b_timing_of_identification_recruitment\",
+  \"signalling_questions\": {
+    \"1b.1\": \"\",
+    \"1b.2\": \"\",
+    \"1b.3\": \"\"
+  },
+  \"judgement\": \"\",
+  \"rationale\": \"\"
+}
+
+Where:
+- 1b.1: Were all participants identified before randomisation of clusters?
+- 1b.2: If not, could knowledge of cluster assignment influence participant recruitment?
+- 1b.3: Is there baseline imbalance consistent with biased recruitment?
+
+Use Y, PY, PN, N, NI.
+
+Text:
+\"\"\"%s\"\"\"",
+          text_block
+  )
+}
+
+build_domain2_prompt <- function(text_block) {
+  sprintf("
+Evaluate Domain 2: Bias due to deviations from intended interventions.
+
+Use ONLY the information in the text below.
+
+Return JSON:
+
+{
+  \"domain\": \"2_deviations_from_intended_interventions\",
+  \"signalling_questions\": {
+    \"2.1\": \"\",
+    \"2.2\": \"\",
+    \"2.3\": \"\",
+    \"2.4\": \"\",
+    \"2.5\": \"\"
+  },
+  \"judgement\": \"\",
+  \"rationale\": \"\"
+}
+
+Where (generic RoB 2 wording):
+- 2.1: Were participants aware of their assigned intervention?
+- 2.2: Were caregivers or personnel aware?
+- 2.3: Were there deviations from intended intervention that arose because of the experimental context?
+- 2.4: Were these deviations likely to have affected the outcome, and were they unbalanced between groups?
+- 2.5: Was the analysis appropriate to estimate the effect of assignment (e.g. intention-to-treat)?
+
+Use Y, PY, PN, N, NI.
+
+Text:
+\"\"\"%s\"\"\"",
+          text_block
+  )
+}
+
+build_domain3_prompt <- function(text_block) {
+  sprintf("
+Evaluate Domain 3: Bias due to missing outcome data.
+
+Use ONLY the information in the text below.
+
+Return JSON:
+
+{
+  \"domain\": \"3_missing_outcome_data\",
+  \"signalling_questions\": {
+    \"3.1\": \"\",
+    \"3.2\": \"\",
+    \"3.3\": \"\"
+  },
+  \"judgement\": \"\",
+  \"rationale\": \"\"
+}
+
+Where:
+- 3.1: Is the proportion of missing outcome data low?
+- 3.2: Is missingness of the outcome data unlikely to depend on its true value?
+- 3.3: Were appropriate methods used to handle missing data?
+
+Use Y, PY, PN, N, NI.
+
+Text:
+\"\"\"%s\"\"\"",
+          text_block
+  )
+}
+
+build_domain4_prompt <- function(text_block) {
+  sprintf("
+Evaluate Domain 4: Bias in measurement of the outcome.
+
+Use ONLY the information in the text below.
+
+Return JSON:
+
+{
+  \"domain\": \"4_measurement_of_outcome\",
+  \"signalling_questions\": {
+    \"4.1\": \"\",
+    \"4.2\": \"\",
+    \"4.3\": \"\",
+    \"4.4\": \"\"
+  },
+  \"judgement\": \"\",
+  \"rationale\": \"\"
+}
+
+Where:
+- 4.1: Was the method of measuring the outcome appropriate?
+- 4.2: Could measurement or ascertainment of the outcome have differed between intervention groups?
+- 4.3: Were outcome assessors aware of the intervention received by participants?
+- 4.4: Could assessment of the outcome have been influenced by knowledge of intervention received?
+
+Use Y, PY, PN, N, NI.
+
+Text:
+\"\"\"%s\"\"\"",
+          text_block
+  )
+}
+
+build_domain5_prompt <- function(text_block) {
+  sprintf("
+Evaluate Domain 5: Bias in selection of the reported result.
+
+Use ONLY the information in the text below, which may include trial registry or protocol information if provided.
+
+Return JSON:
+
+{
+  \"domain\": \"5_selection_of_reported_result\",
+  \"signalling_questions\": {
+    \"5.1\": \"\",
+    \"5.2\": \"\",
+    \"5.3\": \"\"
+  },
+  \"judgement\": \"\",
+  \"rationale\": \"\"
+}
+
+Where:
+- 5.1: Is the reported analysis for the outcome consistent with a prespecified analysis plan?
+- 5.2: Are all prespecified outcomes for this domain reported?
+- 5.3: Is there evidence of selective reporting of analyses or outcomes?
+
+Use Y, PY, PN, N, NI.
+
+Text:
+\"\"\"%s\"\"\"",
+          text_block
+  )
+}
+
+########################################
+## 5. OVERALL RoB ALGORITHM
+########################################
+
+overall_rob_from_domains <- function(domain_judgements) {
+  dom <- tolower(domain_judgements)
+  
+  if (any(dom == "high risk")) {
+    "High"
+  } else if (all(dom == "low risk")) {
+    "Low"
+  } else {
+    "Some concerns"
+  }
+}
+
+########################################
+## 6. SINGLE-TRIAL ASSESSMENT FUNCTION
+########################################
+
+assess_rob2_for_trial <- function(study_id,
+                                  outcome,
+                                  trial_text) {
+  
+  # Optional: truncate extremely long text to manage token limits
+  max_chars <- 20000
+  if (nchar(trial_text) > max_chars) {
+    trial_text <- substr(trial_text, 1, max_chars)
+  }
+  
+  # Extraction
+  extraction_prompt <- build_extraction_prompt(trial_text)
+  extraction_raw    <- call_llm(rob2_system_prompt, extraction_prompt)
+  
+  extraction_json <- tryCatch(
+    fromJSON(extraction_raw),
+    error = function(e) {
+      warning("Failed to parse extraction JSON for study ", study_id, ": ", e$message)
+      list(
+        randomisation_and_allocation   = trial_text,
+        cluster_recruitment_timing     = trial_text,
+        blinding_and_deviations        = trial_text,
+        attrition_and_missing_data     = trial_text,
+        outcome_measurement            = trial_text,
+        selective_reporting_indicators = trial_text
+      )
+    }
+  )
+  
+  # Domains
+  dom1a <- fromJSON(
+    call_llm(rob2_system_prompt,
+             build_domain1a_prompt(extraction_json$randomisation_and_allocation))
+  )
+  dom1b <- fromJSON(
+    call_llm(rob2_system_prompt,
+             build_domain1b_prompt(extraction_json$cluster_recruitment_timing))
+  )
+  dom2 <- fromJSON(
+    call_llm(rob2_system_prompt,
+             build_domain2_prompt(extraction_json$blinding_and_deviations))
+  )
+  dom3 <- fromJSON(
+    call_llm(rob2_system_prompt,
+             build_domain3_prompt(extraction_json$attrition_and_missing_data))
+  )
+  dom4 <- fromJSON(
+    call_llm(rob2_system_prompt,
+             build_domain4_prompt(extraction_json$outcome_measurement))
+  )
+  dom5 <- fromJSON(
+    call_llm(rob2_system_prompt,
+             build_domain5_prompt(extraction_json$selective_reporting_indicators))
+  )
+  
+  domain_judgements <- c(
+    dom1a$judgement,
+    dom1b$judgement,
+    dom2$judgement,
+    dom3$judgement,
+    dom4$judgement,
+    dom5$judgement
+  )
+  
+  overall <- overall_rob_from_domains(domain_judgements)
+  
+  list(
+    study_id   = study_id,
+    outcome    = outcome,
+    extraction = extraction_json,
+    domains    = list(
+      d1a = dom1a,
+      d1b = dom1b,
+      d2  = dom2,
+      d3  = dom3,
+      d4  = dom4,
+      d5  = dom5
+    ),
+    overall_rob = overall
+  )
+}
+
+########################################
+## 7. SHINY UI
+########################################
+
+ui <- fluidPage(
+  titlePanel("RoB 2.0 (Cluster RCT) – LLM-Assisted Assessment"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("pdf_file", "Upload trial PDF",
+                accept = c(".pdf")),
+      textInput("study_id", "Study ID",
+                value = "UploadedStudy"),
+      textInput("outcome", "Outcome (for RoB)",
+                value = "Primary outcome"),
+      actionButton("run_btn", "Run RoB Assessment"),
+      hr(),
+      helpText("Note: Requires OPENAI_API_KEY to be set in environment.")
+    ),
+    
+    mainPanel(
+      h4("Overall Risk of Bias"),
+      tableOutput("overall_table"),
+      hr(),
+      h4("Domain-Level Judgements"),
+      DTOutput("domain_table"),
+      hr(),
+      h4("Domain Rationales"),
+      verbatimTextOutput("rationales")
+    )
+  )
+)
+
+########################################
+## 8. SHINY SERVER
+########################################
+
+server <- function(input, output, session) {
+  
+  rob_result <- eventReactive(input$run_btn, {
+    req(input$pdf_file)
+    
+    # 1. Read PDF
+    pdf_path <- input$pdf_file$datapath
+    pdf_text_vec <- pdftools::pdf_text(pdf_path)
+    trial_text <- paste(pdf_text_vec, collapse = "\n")
+    
+    # 2. Run RoB assessment
+    assess_rob2_for_trial(
+      study_id  = input$study_id %||% tools::file_path_sans_ext(input$pdf_file$name),
+      outcome   = input$outcome,
+      trial_text = trial_text
+    )
+  })
+  
+  output$overall_table <- renderTable({
+    res <- rob_result()
+    tibble(
+      Study_ID   = res$study_id,
+      Outcome    = res$outcome,
+      Overall_RoB = res$overall_rob
+    )
+  })
+  
+  output$domain_table <- renderDT({
+    res <- rob_result()
+    doms <- res$domains
+    
+    domain_df <- tibble(
+      Domain = c("1a_randomisation_process",
+                 "1b_timing_of_identification_recruitment",
+                 "2_deviations_from_intended_interventions",
+                 "3_missing_outcome_data",
+                 "4_measurement_of_outcome",
+                 "5_selection_of_reported_result"),
+      Judgement = c(
+        doms$d1a$judgement,
+        doms$d1b$judgement,
+        doms$d2$judgement,
+        doms$d3$judgement,
+        doms$d4$judgement,
+        doms$d5$judgement
+      )
+    )
+    
+    datatable(domain_df,
+              options = list(pageLength = 10),
+              rownames = FALSE)
+  })
+  
+  output$rationales <- renderPrint({
+    res <- rob_result()      
+    doms <- res$domains
+    
+    cat("Domain 1a – Randomisation process:\n")
+    cat(doms$d1a$rationale, "\n\n")
+    cat("Domain 1b – Timing of identification / recruitment:\n")
+    cat(doms$d1b$rationale, "\n\n")
+    cat("Domain 2 – Deviations from intended interventions:\n")
+    cat(doms$d2$rationale, "\n\n")
+    cat("Domain 3 – Missing outcome data:\n")
+    cat(doms$d3$rationale, "\n\n")
+    cat("Domain 4 – Measurement of the outcome:\n")
+    cat(doms$d4$rationale, "\n\n")
+    cat("Domain 5 – Selection of the reported result:\n")
+    cat(doms$d5$rationale, "\n")
+  })
+}
+
+########################################
+## 9. RUN APP
+########################################
+
+shinyApp(ui = ui, server = server)
