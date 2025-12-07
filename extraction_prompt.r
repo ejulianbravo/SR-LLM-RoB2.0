@@ -20,5 +20,6 @@ relevant parts. If there is no information for a field, write \"No information r
 Trial text:
 \"\"\"%s\"\"\"",
           trial_text
+          Participants were allocated using an adaptive randomization method in a 1:1 ratio to either group using an automated program implemented in R, version 4.3.0, with a custom script by a blinded allocation manager (S.T.). This adaptive approach used weighting for between-group matching of key baseline characteristics, including the number of participants, mean age, variance of age, mean MADRS score, variance of MADRS score, and number of female participants. Information regarding the allocated group was conveyed to the treatment personnel prior to the start of maintenance treatment. All other involved parties, including outcome raters, were blinded to the treatment allocation throughout the study.
   )
 }
