@@ -1,0 +1,8 @@
+{
+  "randomisation_and_allocation": "Participants were allocated 1:1 using an adaptive randomization procedure implemented in R. A blinded allocation manager generated assignments based on weighted matching of baseline cluster characteristics (participant numbers, mean/variance of age, mean/variance of MADRS, and number of female participants). Treatment personnel were informed of allocation before maintenance treatment.",
+  "cluster_recruitment_timing": "No information reported regarding whether participants were identified or recruited before or after cluster allocation.",
+  "blinding_and_deviations": "Outcome raters and all parties other than treatment personnel were blinded to allocation. Treatment personnel were aware of assigned groups before maintenance treatment began. No details were provided on deviations from intended interventions related to awareness of assignment.",
+  "attrition_and_missing_data": "No information reported on attrition, completeness of outcome data, or handling of missing data.",
+  "outcome_measurement": "Outcome raters were blinded to treatment allocation. No additional details were provided on whether outcome measures were standardized, objective, or susceptible to differential measurement error.",
+  "selective_reporting_indicators": "No information reported regarding prespecified outcomes, trial registration, analysis plans, or discrepancies between planned and reported outcomes."
+}
