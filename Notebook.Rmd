@@ -582,8 +582,7 @@ Creates a dataframe with summarized info, results for each domain, and overall j
 trials_df <- tibble::tibble(
   study_id  = c("ExampleTrial1"),
   outcome   = c("Primary outcome"),
-  trial_text = c(
-    "Example RCT text goes here."
+  trial_text = c(trial_text
   )
 )
 ```
